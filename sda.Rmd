@@ -1,0 +1,351 @@
+---
+title: "Globant - Data Scientist Test"
+author: "Tatiana León"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Statement
+
+In this dataset you have 3 different outputs:
+
+1. No readmission;
+2. A readmission in less than 30 days (this situation is not good, because maybe your treatment was not appropriate);
+3. A readmission in more than 30 days (this one is not so good as well the last one, however, the reason could be the state of the patient.
+
+Your task is either to classify a patient-hospital outcome or to cluster them aiming at finding patterns that give a distinct insight.
+
+
+```{r}
+library(dplyr)
+library(class)
+library(pROC)
+library(dummies)
+library(ROSE)
+library(sjPlot)
+library(ggplot2)
+
+setwd("C:/Users/Tatiana/Desktop/Programming")
+```
+
+## Reading and analyzing the data
+
+We begin by reading and analyzing the data of the _Machine Learning UCI repository_ in this link: https://archive.ics.uci.edu/ml/datasets/Diabetes+130-US+hospitals+for+years+1999-2008#
+
+The zip contains two datasets:
+
+1. diabetic_data
+2. IDs_mapping
+
+```{r}
+data <- read.csv("diabetic_data.csv", sep = ",")
+IDsMapp <- read.csv("IDs_mapping.csv", sep = ",")
+head(data)
+```
+Now we will get some insights of the data, for example, the features, its values, its structure and the relevant variables. 
+```{r}
+colnames(data)
+str(data)
+```
+The first two columns encounter_id and patient_nbr are not relevant to this project, so we will remove them.
+
+```{r}
+data <- data %>% select(-encounter_id, -patient_nbr)
+head(data)
+```
+Let's explore diag_1, diag_2 and diag_3 variables, as they have lots of values.
+
+```{r}
+diag1_table <- data %>% group_by(diag_1) %>% summarise(count = n(), prop = n()/nrow(data)) %>% arrange(desc(prop))
+diag1_table
+```
+
+```{r}
+diag2_table <- data %>% group_by(diag_2) %>% summarise(count = n(), prop = n()/nrow(data)) %>% arrange(desc(prop))
+diag2_table
+```
+
+
+```{r}
+diag3_table <- data %>% group_by(diag_3) %>% summarise(count = n(), prop = n()/nrow(data)) %>% arrange(desc(prop))
+diag3_table
+```
+
+As they all have lots of values and none of them are significant, we will not add this variables to the model process.
+```{r}
+data <- data %>% select(-diag_1, -diag_2, -diag_3)
+rm(diag1_table, diag2_table, diag3_table)
+```
+
+Let's take a second look of the data.
+
+```{r}
+sapply(data, unique)
+```
+We have some "?" values in the missing data, so we will replace this values with the corresponding NA
+
+```{r}
+data <-na_if(data, "?")
+str(data)
+```
+Some of the variables aren't significant as they don't have density, so we will remove them. These variables are:
+1. examide
+2. citoglipton
+3. acetohexamide
+4. troglitazone
+5. tolbutamide
+6. glimepiride.pioglitazone
+7. metformin.rosiglitazone
+8. metformin.pioglitazone
+9. glipizide.metformin
+```{r}
+data <- data %>% 
+  select(-examide, -citoglipton, -acetohexamide, -troglitazone, -tolbutamide, -glimepiride.pioglitazone, -metformin.rosiglitazone, -metformin.pioglitazone, -glipizide.metformin)
+sapply(data, unique)
+```
+Now we can convert the variables weight and age into numerical variables.
+
+```{r}
+data$weight <- ifelse(is.na(data$weight), "ND", data$weight)
+data$weight <- as.factor(data$weight)
+data$weight <- as.character(factor(data$weight,
+                            levels = c("[0-25)", "[100-125)",  "[125-150)", "[150-175)", "[175-200)", "[25-50)" ,"[50-75)" , "[75-100)", ">200" , "ND"),
+                            labels = c(25, 125,  150, 175, 200, 50 ,75 ,100, 200 , 0)),
+                            stringsAsFactors=FALSE)
+data$weight <- as.numeric(data$weight)
+
+data$age <- ifelse(is.na(data$age), "ND", data$age)
+data$age <- as.factor(data$age)
+data$age <-  as.character(factor(data$age,
+                          levels = c("[0-10)", "[10-20)", "[20-30)", "[30-40)", "[40-50)","[50-60)","[60-70)","[70-80)", "[80-90)", "[90-100)"),
+                          labels = c(10, 20,  30,40, 50, 60 ,70 ,80, 90 ,100)),
+                          stringsAsFactors=FALSE)
+data$age <- as.numeric(data$age)
+str(data)
+```
+The variables admission_type_id, discharge_disposition_id and admission_source_id, are categorical, although they seem numerical. We can see the meaning of each ID in the IDsMapp dataset.
+
+Some of their values don't need to be included in our model. We will remove the rows with discharge_disposition_id equal to 11, 19, 20, 21, as they mean expired status.
+
+```{r}
+data <- data[data$discharge_disposition_id!=11,]
+data <- data[data$discharge_disposition_id!=19,]
+data <- data[data$discharge_disposition_id!=20,]
+data <- data[data$discharge_disposition_id!=21,]
+rm(IDsMapp)
+```
+
+Now let's define and explore our outcome vector.
+
+```{r}
+readm_t <- data %>% 
+  group_by(readmitted) %>% 
+  summarise(count = n(), prop = n()/nrow(data))
+readm_t
+```
+
+We would want to predict the readmitted cases in less than 30 days. So we will define our outcome variable as follows:
+
+```{r}
+y <- as.numeric(as.factor(data$readmitted))
+y <- ifelse(y == 1,1,0)
+rm(readm_t)
+```
+We can see that we have less than 50% of the data corresponding to the outcome 1, this implies that later we have to do some oversampling work.
+
+Now, we will set-up all the data variables.
+
+```{r}
+data <- data %>% select(-readmitted)
+
+#get NAs
+apply(apply(data, 2, is.na), 2, sum)
+```
+race, payer_code and medical_speciality are categorical variables, and they we NA values, we have to remove them by changing its value.
+
+```{r}
+data[is.na(data)] <- "ND"
+
+#verify
+apply(apply(data, 2, is.na), 2, sum)
+```
+
+Now, we will set-up the categorical and the numerical variables.
+
+```{r}
+cat_v <- colnames(data[,unlist(lapply(data,is.character))])
+cat_v <- c(cat_v, "admission_type_id", "discharge_disposition_id", "admission_source_id")
+cat_v
+
+##numerical variables
+num_v <- colnames(data[,unlist(lapply(data,is.numeric))])
+num_v <- num_v[-c(3,4,5)]
+num_v
+```
+From the categorical variables, we will reduce medical_specialty and payer_code.
+```{r}
+med_sp_t <- data %>% group_by(medical_specialty) %>% summarise(count = n(), prop = n()/nrow(data)) %>% arrange(desc(prop))
+med_sp_t
+```
+Lets reduce the 10% of the values into the category "Other".
+```{r}
+med_spec_v <- c("ND", "InternalMedicine", "Emergency/Trauma", "Family/GeneralPractice", "Cardiology", "Surgery-General", "Nephrology", "Orthopedics" )
+data  <-  data %>% mutate(medical_specialty = if_else(medical_specialty %in% med_spec_v, medical_specialty, "Other"))
+rm(med_spec_v, med_sp_t)
+```
+We will apply the same treatment to the payer_code variable.
+```{r}
+payer_t <- data %>% group_by(payer_code) %>% summarise(count = n(), prop = n()/nrow(data))%>% arrange(desc(prop))
+payer_t
+```
+```{r}
+payer_v <- c("CP", "UN", "CM", "OG", "PO", "DM", "CH", "WC", "OT", "MP", "SI", "FR")
+data  <-  data %>% mutate(payer_code = if_else(payer_code %in% payer_v, payer_code, "Other"))
+rm(payer_v, payer_t)
+```
+
+Now we will convert the categorical variables in dummies, and then paste them to the numerical variables. This will be our preliminary final data.
+
+```{r}
+for (i in 1:25) {
+  data[cat_v][,i] <- as.factor(data[cat_v][,i])
+}
+
+data_cat<-dummy.data.frame(data[cat_v])
+data_num <- data[num_v]
+
+data.d <- cbind(data_cat, data_num) 
+rm(data_cat, data_num, i, cat_v, num_v)
+
+head(data.d)
+```
+## Performing the model
+
+First, we will normalize the variables of the dataset.
+
+```{r}
+normalize <- function(x)
+{
+  return((x- min(x)) /(max(x)-min(x)))
+}
+data.n <- as.data.frame(lapply(data.d[,], normalize))
+```
+
+As we said before, this dataset is imbalanced, so we have to oversampling its outcome values to get a better performance of the model.
+
+```{r}
+data.n <- cbind(data.n,y)
+data.b <- ovun.sample(y~., data.n, method = "both", p = 0.5, seed = 42)
+data.b <- as.data.frame(data.b$data)
+```
+
+Now, we will sample the rows.
+
+```{r}
+set.seed(42)
+rows <- sample(nrow(data.b))
+data.b <- data.b[rows,]
+rm(rows)
+
+y.b <- data.b$y
+data.b <- data.b %>% select(-y)
+```
+
+Our final dataset to perform the model will be data.b.
+
+#### k-Nearest Neighbor (knn)
+
+With a piece of dataset, we will find the optimal k-value to train the knn model.
+
+```{r}
+data_test1 <- data.b[1:100,]
+data_test2 <- data.b[101:200,]
+y_test1 <-y.b[1:100]
+y_test2 <- y.b[101:200]
+```
+
+
+```{r}
+v <- c(0,0,0)
+for (i in 1:floor(sqrt(100114*0.7))+1) {
+  knn <- knn(data_test1, data_test2, cl=y_test1, k=i, prob = TRUE) 
+  accuracy = (table(knn ,y_test2)[1,1] + table(knn ,y_test2)[2,2])/sum(table(knn ,y_test2))
+  r <- roc(y_test2, attributes(knn)$prob)
+  v <- rbind(v, c(i, accuracy, as.numeric(r$auc)))
+}
+v <- as.data.frame(v)
+colnames(v) <- c("k", "accuracy", "auc")
+v
+```
+
+
+```{r}
+ggplot(v,aes(x=k))+
+  geom_line(aes(y=auc, col = "auc"))+
+  geom_line(aes(y=accuracy, col = "accuracy"))+
+  labs(title="Finding the optimal k")+
+  scale_color_manual(name="", 
+                     values = c("auc"="#00ba38", "accuracy"="#f8766d")) + 
+  theme(panel.grid.minor = element_blank())
+```
+
+We find the optimal k value in k = 60. Now we split our final data into 70% train and 30% test and then aplly the knn model.
+
+```{r}
+rm(r, v, data_test1, data_test2, y_test1, y_test2, data.d, data.n, data)
+
+data_train <- data.b[1:70080,]
+data_test <- data.b[70081:nrow(data.b),]
+y_train <-y.b[1:70080]
+y_test <- y.b[70081:nrow(data.b)]
+
+knn <- knn(data_train, data_test, cl=y_train, k=60, prob = TRUE)
+```
+
+## Evaluating the model
+
+```{r}
+roc(y_test, attributes(knn)$prob)
+plot(roc(y_test, attributes(knn)$prob),
+     print.thres = T,
+     print.auc=T)
+```
+
+
+```{r}
+table(knn ,y_test)
+```
+
+
+```{r}
+accuracy = (table(knn ,y_test)[1,1] + table(knn ,y_test)[2,2])/sum(table(knn ,y_test))
+accuracy
+```
+
+
+```{r}
+recall = (table(knn ,y_test)[1,1])/(table(knn ,y_test)[1,1]+table(knn ,y_test)[2,1])
+recall
+```
+
+
+```{r}
+precision = table(knn ,y_test)[1,1] /(table(knn ,y_test)[1,1]+table(knn ,y_test)[1,2])
+precision
+```
+
+
+```{r}
+specificity = table(knn ,y_test)[2,2]/(table(knn ,y_test)[1,2]+table(knn ,y_test)[2,2])
+specificity
+```
+
+
+```{r}
+prevalence = (table(knn ,y_test)[1,1]+table(knn ,y_test)[2,1])/sum(table(knn ,y_test))
+prevalence
+```
+
+
